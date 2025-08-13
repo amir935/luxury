@@ -1,0 +1,232 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+  // If you keep hitting FK/referential errors during early dev, temporarily use:
+  // relationMode = "prisma"
+}
+
+enum Role {
+  RIDER
+  DRIVER
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum RideStatus {
+  REQUESTED
+  ASSIGNED
+  ACCEPTED
+  DRIVER_ARRIVING
+  IN_PROGRESS
+  COMPLETED
+  CANCELED
+}
+
+enum VehicleClass {
+  SILVER
+  GOLD
+  PLATINUM
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+}
+
+enum RiderPaymentStatus {
+  PENDING
+  PAID
+  REFUNDED
+}
+
+enum DriverPayoutStatus {
+  PENDING
+  PAID
+}
+
+model User {
+  id           Int      @id @default(autoincrement())
+  name         String
+  email        String?  @unique
+  passwordHash String?
+  googleId     String?  @unique
+  role         Role     @default(RIDER)
+  phone        String?  @unique
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  isVerified   Boolean  @default(false)
+  tokenVersion Int      @default(0)
+  avatarUrl    String?  @map("avatar_url")
+
+  driverProfile     DriverProfile?
+  ridesAsRider      Ride[]             @relation("RiderRides")
+  ridesAsDriver     Ride[]             @relation("DriverRides")
+  verificationCodes VerificationCode[]
+  passwordResets    PasswordReset[]
+
+  // ⬇️ add these back-relations
+  driverWallet  DriverWallet?
+  walletLedgers WalletLedger[]
+}
+
+model DriverProfile {
+  id            Int     @id @default(autoincrement())
+  userId        Int     @unique
+  licenseNumber String
+  isVerified    Boolean @default(false)
+  isActive      Boolean @default(false)
+
+  // live location
+  currentLat        Float?
+  currentLng        Float?
+  locationUpdatedAt DateTime?
+
+  // ratings
+  ratingAvg   Decimal? @db.Decimal(3, 2) // e.g. 4.60
+  ratingCount Int      @default(0)
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vehicles Vehicle[]
+
+  @@index([isActive])
+  @@index([isVerified])
+}
+
+model Vehicle {
+  id         Int          @id @default(autoincrement())
+  driverId   Int
+  make       String
+  model      String
+  year       Int
+  plate      String       @unique
+  color      String?
+  class      VehicleClass
+  isApproved Boolean      @default(false)
+
+  // UI extras
+  imageUrl String? @map("image_url")
+  seats    Int     @default(4)
+
+  driver DriverProfile @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  rides  Ride[]
+
+  @@index([driverId])
+  @@index([isApproved])
+  @@index([class])
+}
+
+model Ride {
+  id        Int        @id @default(autoincrement())
+  riderId   Int
+  driverId  Int?
+  vehicleId Int?
+  status    RideStatus @default(REQUESTED)
+
+  pickupAddress  String
+  pickupLat      Float
+  pickupLng      Float
+  dropoffAddress String
+  dropoffLat     Float
+  dropoffLng     Float
+
+  estimatedPrice Decimal  @db.Decimal(10, 2)
+  finalPrice     Decimal? @db.Decimal(10, 2)
+  currency       String   @default("ETB")
+
+  requestedAt DateTime  @default(now())
+  acceptedAt  DateTime?
+  startedAt   DateTime?
+  completedAt DateTime?
+  canceledAt  DateTime?
+
+  rider   User     @relation("RiderRides", fields: [riderId], references: [id], onDelete: Restrict)
+  driver  User?    @relation("DriverRides", fields: [driverId], references: [id], onDelete: SetNull)
+  vehicle Vehicle? @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+
+  commissionRate Decimal? @db.Decimal(5, 4) // e.g. 0.1500
+  platformFee    Decimal? @db.Decimal(10, 2)
+  driverEarnings Decimal? @db.Decimal(10, 2)
+
+  paymentMethod      PaymentMethod      @default(CASH)
+  riderPaymentStatus RiderPaymentStatus @default(PENDING)
+  driverPayoutStatus DriverPayoutStatus @default(PENDING)
+  paidAt             DateTime?
+  payoutAt           DateTime?
+
+  distanceKm Float?
+
+  // ⬇️ add this back-relation
+  walletLedgers WalletLedger[]
+
+  @@index([status])
+  @@index([riderId])
+  @@index([driverId])
+  @@index([vehicleId])
+}
+
+model VerificationCode {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  code      String
+  channel   String
+  sentTo    String
+  expiresAt DateTime
+  attempts  Int      @default(0)
+  consumed  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([sentTo, consumed])
+}
+
+model PasswordReset {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  code      String
+  channel   String
+  sentTo    String
+  expiresAt DateTime
+  attempts  Int      @default(0)
+  consumed  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([sentTo, consumed])
+}
+
+model DriverWallet {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @unique
+  balance   Decimal  @default(0) @db.Decimal(12, 2) // >0 = we owe driver; <0 = driver owes us
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+enum LedgerType {
+  CREDIT // increases driver balance (we owe driver)
+  DEBIT // decreases driver balance (driver owes platform)
+}
+
+model WalletLedger {
+  id        Int        @id @default(autoincrement())
+  userId    Int
+  rideId    Int?
+  type      LedgerType
+  amount    Decimal    @db.Decimal(12, 2) // positive amount
+  note      String?
+  createdAt DateTime   @default(now())
+
+  user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ride Ride? @relation(fields: [rideId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([rideId])
+}
