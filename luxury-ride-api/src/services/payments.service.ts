@@ -1,52 +1,52 @@
 // services/payments.service.ts
-import { prisma, } from "../lib/prisma";
+import { prisma } from "../lib/prisma";
+// ✅ Use the runtime Decimal class
+import { Decimal } from "@prisma/client/runtime/library";
 
 export async function settleRide(rideId: number) {
   const ride = await prisma.ride.findUnique({ where: { id: rideId } });
   if (!ride || ride.status !== "COMPLETED" || !ride.driverId) return;
 
-  // defaults if missing
-  const commissionRate = ride.commissionRate ?? new prisma.Decimal("0.15");
-  const fare = ride.finalPrice ?? ride.estimatedPrice;
+  // Use Decimal (runtime) for all money math
+  const fare = new Decimal((ride.finalPrice ?? ride.estimatedPrice).toString());
+  const commissionRate = ride.commissionRate
+    ? new Decimal(ride.commissionRate.toString())
+    : new Decimal("0.15");
 
-  const commission = fare.mul(commissionRate);   // platform earns
-  const driverNet  = fare.sub(commission);       // driver earns
+  const commission = fare.mul(commissionRate);
+  const driverNet  = fare.sub(commission);
 
-  await prisma.$transaction(async (tx) => {
-    // upsert wallet
+  await prisma.$transaction(async (tx:any) => {
     const wallet = await tx.driverWallet.upsert({
       where: { userId: ride.driverId! },
       update: {},
-      create: { userId: ride.driverId!, balance: new prisma.Decimal(0)    },
+      create: { userId: ride.driverId!, balance: new Decimal(0) },
     });
 
-    // CREDIT driver (we owe driver) with driverNet
     await tx.walletLedger.create({
       data: {
         userId: ride.driverId!,
         rideId: ride.id,
-        type: "CREDIT",
-        amount: driverNet,
-        note: "Ride earnings",
+        type: "DEBIT",
+        amount: commission,               // Decimal is accepted for Decimal columns
+        note: "Cash ride commission",
       },
     });
 
-    // Update wallet balance
     await tx.driverWallet.update({
-      where: { userId: ride.driverId! },
-      data: { balance: wallet.balance.add(driverNet) },
+      where: { id: wallet.id },
+      data: { balance: new Decimal(wallet.balance.toString()).sub(commission) },
     });
 
-    // Store computed fields on the ride
     await tx.ride.update({
       where: { id: ride.id },
       data: {
         commissionRate,
         platformFee: commission,
         driverEarnings: driverNet,
-        riderPaymentStatus: "PAID",     // if you collected cash/card
-        driverPayoutStatus: "PENDING",  // driver still needs payout
-        paidAt: new Date(),
+        riderPaymentStatus: "PENDING",
+        driverPayoutStatus: "PENDING",
+        paidAt: null,
       },
     });
   });

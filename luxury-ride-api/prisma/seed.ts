@@ -159,7 +159,7 @@ async function seedRides() {
 
 async function main() {
   await seedAdmin();
-  await seedRides();
+  // await seedRides();
 }
 
 main()
